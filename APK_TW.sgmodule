@@ -1,0 +1,14 @@
+#!name=APK.TW 自動簽到
+#!desc=自動擷取 APK.TW 登入 Cookie，並每日自動執行簽到
+#!author=howsingsong
+#!arguments=hour:0,minute:20,notify:true
+#!arguments-desc=hour：每日簽到小時（0-23）；minute：每日簽到分鐘（0-59）；notify：是否顯示簽到通知（true/false）
+
+[Script]
+
+APK.TW Cookie 擷取 = type=http-request,pattern=^https:\/\/(?:www\.)?apk\.tw\/(?:forum\.php|plugin\.php|home\.php),script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_cookie.js,timeout=10
+
+APK.TW 每日自動簽到 = type=cron,cronexp="{{{minute}}} {{{hour}}} * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_checkin.js,argument="notify={{{notify}}}",wake-system=true,timeout=30
+
+[MITM]
+hostname = %APPEND% apk.tw, www.apk.tw
