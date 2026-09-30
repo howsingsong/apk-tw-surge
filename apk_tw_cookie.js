@@ -1,217 +1,539 @@
 /*
- * APK.TW Cookie Manager V2
+ * APK.TW Cookie Manager V3
  * Author: howsingsong
  *
- * 同時支援：
- * - http-request：完整擷取 Safari Cookie / UA
- * - http-response：合併伺服器 Set-Cookie
+ * 功能：
+ * 1. 擷取 Safari / 私密模式完整 Cookie
+ * 2. 支援多個 Cookie Header
+ * 3. 自動保存 User-Agent
+ * 4. 自動保存 formhash
+ * 5. 接收所有 Set-Cookie 自動更新
+ * 6. 登入 Cookie 成功時通知
  */
 
-const COOKIE_KEY = "APK_TW_COOKIE_V2";
-const UA_KEY = "APK_TW_UA";
-const FORMHASH_KEY = "APK_TW_FORMHASH";
+const COOKIE_KEY = "APK_TW_COOKIE_V3";
+const AUTH_KEY = "APK_TW_AUTH_V3";
+const UA_KEY = "APK_TW_UA_V3";
+const FORMHASH_KEY = "APK_TW_FORMHASH_V3";
+const NOTICE_KEY = "APK_TW_LOGIN_NOTICE_V3";
 
-function headerValues(headers, name) {
+
+/* ==============================
+ * Arguments
+ * ============================== */
+
+const ARG =
+  typeof $argument !== "undefined"
+    ? String($argument)
+    : "";
+
+const LOGIN_NOTIFY =
+  !/login_notify=(false|0|off|no)/i.test(ARG);
+
+
+/* ==============================
+ * Header
+ * ============================== */
+
+function getHeaderValues(headers, name) {
   const result = [];
-  if (!headers) return result;
 
-  if (Array.isArray(headers)) {
-    headers.forEach(h => {
-      if (
-        h &&
-        h.field &&
-        h.field.toLowerCase() === name.toLowerCase()
-      ) {
-        result.push(String(h.value || ""));
-      }
-    });
+  if (!headers) {
     return result;
   }
 
-  Object.keys(headers).forEach(key => {
-    if (key.toLowerCase() !== name.toLowerCase()) return;
+  /*
+   * full-header-mode
+   */
+  if (Array.isArray(headers)) {
+    headers.forEach(function (item) {
+      if (
+        item &&
+        item.field &&
+        String(item.field).toLowerCase() ===
+          name.toLowerCase()
+      ) {
+        result.push(
+          String(item.value || "")
+        );
+      }
+    });
 
-    const v = headers[key];
+    return result;
+  }
 
-    if (Array.isArray(v)) {
-      v.forEach(x => result.push(String(x || "")));
+  /*
+   * 一般模式 fallback
+   */
+  Object.keys(headers).forEach(function (key) {
+    if (
+      key.toLowerCase() !==
+      name.toLowerCase()
+    ) {
+      return;
+    }
+
+    const value = headers[key];
+
+    if (Array.isArray(value)) {
+      value.forEach(function (v) {
+        result.push(String(v || ""));
+      });
     } else {
-      result.push(String(v || ""));
+      result.push(String(value || ""));
     }
   });
 
   return result;
 }
 
-function cookieObjectFromValues(values) {
-  const map = {};
 
-  values.forEach(value => {
+/* ==============================
+ * Cookie
+ * ============================== */
+
+function cookieValuesToObject(values) {
+  const result = {};
+
+  values.forEach(function (value) {
     String(value || "")
       .split(/;\s*/)
-      .forEach(part => {
+      .forEach(function (part) {
         const pos = part.indexOf("=");
 
-        if (pos <= 0) return;
+        if (pos <= 0) {
+          return;
+        }
 
-        const name = part.substring(0, pos).trim();
-        const val = part.substring(pos + 1);
+        const name =
+          part.substring(0, pos).trim();
 
-        if (name) map[name] = val;
+        const val =
+          part.substring(pos + 1);
+
+        if (name) {
+          result[name] = val;
+        }
       });
   });
 
-  return map;
+  return result;
 }
 
-function cookieObject(cookie) {
-  return cookieObjectFromValues([cookie || ""]);
+
+function cookieStringToObject(cookie) {
+  return cookieValuesToObject([
+    String(cookie || "")
+  ]);
 }
 
-function cookieString(map) {
-  return Object.keys(map)
-    .map(key => `${key}=${map[key]}`)
+
+function cookieObjectToString(obj) {
+  return Object.keys(obj)
+    .map(function (key) {
+      return (
+        key +
+        "=" +
+        obj[key]
+      );
+    })
     .join("; ");
 }
 
-function hasAuth(cookie) {
-  return /(?:^|;\s*)[^=;]+_auth=[^;]+/i.test(cookie || "");
-}
 
-function mergeSetCookies(oldCookie, lines) {
-  const map = cookieObject(oldCookie);
+function findAuthCookie(cookie) {
+  const map =
+    cookieStringToObject(cookie);
 
-  lines.forEach(line => {
-    if (!line) return;
+  const names =
+    Object.keys(map);
 
-    const first = line.split(";")[0];
-    const pos = first.indexOf("=");
+  for (
+    let i = 0;
+    i < names.length;
+    i++
+  ) {
+    const name = names[i];
 
-    if (pos <= 0) return;
-
-    const name = first.substring(0, pos).trim();
-    const value = first.substring(pos + 1);
-
-    const deleted =
-      /^deleted$/i.test(value) ||
-      /max-age\s*=\s*0/i.test(line) ||
-      /expires\s*=\s*(?:thu|tue|wed|mon|fri|sat|sun),?\s*0?1[-\s]jan[-\s]1970/i.test(line);
-
-    if (deleted) {
-      delete map[name];
-    } else {
-      map[name] = value;
+    if (
+      /_auth$/i.test(name) &&
+      map[name]
+    ) {
+      return (
+        name +
+        "=" +
+        map[name]
+      );
     }
-  });
+  }
 
-  return cookieString(map);
+  return "";
 }
+
+
+function hasAuth(cookie) {
+  return !!findAuthCookie(cookie);
+}
+
+
+/* ==============================
+ * Set-Cookie 合併
+ * ============================== */
+
+function mergeSetCookies(
+  oldCookie,
+  setCookieHeaders
+) {
+  const map =
+    cookieStringToObject(oldCookie);
+
+  setCookieHeaders.forEach(
+    function (line) {
+      if (!line) {
+        return;
+      }
+
+      const first =
+        String(line).split(";")[0];
+
+      const pos =
+        first.indexOf("=");
+
+      if (pos <= 0) {
+        return;
+      }
+
+      const name =
+        first
+          .substring(0, pos)
+          .trim();
+
+      const value =
+        first.substring(pos + 1);
+
+      const deleted =
+        /^deleted$/i.test(value) ||
+        /max-age\s*=\s*0/i.test(line) ||
+        /expires\s*=\s*.*1970/i.test(line);
+
+      if (deleted) {
+        delete map[name];
+      } else {
+        map[name] = value;
+      }
+    }
+  );
+
+  return cookieObjectToString(map);
+}
+
+
+/* ==============================
+ * formhash
+ * ============================== */
 
 function saveFormhash(url) {
-  const m = String(url || "").match(/[?&]formhash=([^&#]+)/i);
+  const match =
+    String(url || "").match(
+      /[?&]formhash=([^&#]+)/i
+    );
 
-  if (!m || !m[1]) return;
+  if (
+    !match ||
+    !match[1]
+  ) {
+    return;
+  }
+
+  let hash =
+    match[1];
 
   try {
+    hash =
+      decodeURIComponent(hash);
+  } catch (_) {}
+
+  if (hash) {
     $persistentStore.write(
-      decodeURIComponent(m[1]),
+      hash,
       FORMHASH_KEY
     );
-  } catch (_) {
-    $persistentStore.write(m[1], FORMHASH_KEY);
+
+    console.log(
+      "APK.TW：formhash 已更新"
+    );
   }
 }
 
-/*
- * REQUEST
- */
-function handleRequest() {
-  const values = headerValues(
-    $request.headers,
-    "cookie"
+
+/* ==============================
+ * 通知
+ * ============================== */
+
+function loginNotification(
+  oldAuth,
+  newAuth,
+  cookieCount
+) {
+  if (!LOGIN_NOTIFY) {
+    return;
+  }
+
+  const now =
+    Date.now();
+
+  const lastNotice =
+    parseInt(
+      $persistentStore.read(
+        NOTICE_KEY
+      ) || "0",
+      10
+    );
+
+  let shouldNotify = false;
+  let subtitle = "";
+
+  /*
+   * 第一次取得
+   */
+  if (!oldAuth) {
+    shouldNotify = true;
+    subtitle = "登入資料擷取成功";
+  }
+
+  /*
+   * auth 更新
+   */
+  else if (
+    oldAuth !== newAuth
+  ) {
+    shouldNotify = true;
+    subtitle = "登入憑證已更新";
+  }
+
+  /*
+   * 新 V3 第一次確認，
+   * 或超過 24 小時才再次通知。
+   */
+  else if (
+    !lastNotice ||
+    now - lastNotice >
+      24 * 60 * 60 * 1000
+  ) {
+    shouldNotify = true;
+    subtitle = "登入狀態已確認";
+  }
+
+  if (!shouldNotify) {
+    return;
+  }
+
+  $persistentStore.write(
+    String(now),
+    NOTICE_KEY
   );
 
-  if (values.length) {
+  $notification.post(
+    "✅ APK.TW",
+    subtitle,
+    "已儲存完整登入 Cookie，共 " +
+      cookieCount +
+      " 項。"
+  );
+}
+
+
+/* ==============================
+ * Request
+ * ============================== */
+
+function handleRequest() {
+  const cookieHeaders =
+    getHeaderValues(
+      $request.headers,
+      "cookie"
+    );
+
+  console.log(
+    "APK.TW：偵測到 " +
+      cookieHeaders.length +
+      " 個 Cookie Header"
+  );
+
+  if (
+    cookieHeaders.length > 0
+  ) {
+    const map =
+      cookieValuesToObject(
+        cookieHeaders
+      );
+
     const fullCookie =
-      cookieString(cookieObjectFromValues(values));
+      cookieObjectToString(map);
+
+    const newAuth =
+      findAuthCookie(
+        fullCookie
+      );
+
+    const oldAuth =
+      $persistentStore.read(
+        AUTH_KEY
+      ) || "";
 
     /*
-     * 只有含登入 auth 才覆寫，
-     * 避免訪客 Cookie 蓋掉有效登入。
+     * 只有真正登入狀態
+     * 才允許更新主 Cookie。
      */
-    if (fullCookie && hasAuth(fullCookie)) {
+    if (
+      fullCookie &&
+      newAuth
+    ) {
       $persistentStore.write(
         fullCookie,
         COOKIE_KEY
       );
 
+      $persistentStore.write(
+        newAuth,
+        AUTH_KEY
+      );
+
       console.log(
-        `APK.TW：已擷取完整 Cookie，共 ${Object.keys(cookieObject(fullCookie)).length} 項`
+        "APK.TW：完整登入 Cookie 已擷取，共 " +
+          Object.keys(map).length +
+          " 項"
+      );
+
+      loginNotification(
+        oldAuth,
+        newAuth,
+        Object.keys(map).length
+      );
+    } else {
+      console.log(
+        "APK.TW：本次請求沒有 auth Cookie，不覆蓋已保存登入資料"
       );
     }
   }
 
-  const uas = headerValues(
-    $request.headers,
-    "user-agent"
-  );
+  /*
+   * User-Agent
+   */
+  const userAgents =
+    getHeaderValues(
+      $request.headers,
+      "user-agent"
+    );
 
-  if (uas[0]) {
+  if (userAgents[0]) {
     $persistentStore.write(
-      uas[0],
+      userAgents[0],
       UA_KEY
     );
   }
 
-  saveFormhash($request.url);
-
-  /*
-   * 不修改任何原始 Request
-   */
-  $done();
-}
-
-/*
- * RESPONSE
- */
-function handleResponse() {
-  let cookie =
-    $persistentStore.read(COOKIE_KEY) || "";
-
-  const sets = headerValues(
-    $response.headers,
-    "set-cookie"
+  saveFormhash(
+    $request.url
   );
 
-  if (sets.length) {
-    cookie = mergeSetCookies(
-      cookie,
-      sets
-    );
-
-    $persistentStore.write(
-      cookie,
-      COOKIE_KEY
-    );
-
-    console.log(
-      `APK.TW：收到 ${sets.length} 筆 Set-Cookie，已更新`
-    );
-  }
-
-  $done();
+  /*
+   * 完全不修改原始 request
+   */
+  $done({});
 }
 
+
+/* ==============================
+ * Response
+ * ============================== */
+
+function handleResponse() {
+  let cookie =
+    $persistentStore.read(
+      COOKIE_KEY
+    ) || "";
+
+  const setCookies =
+    getHeaderValues(
+      $response.headers,
+      "set-cookie"
+    );
+
+  if (
+    setCookies.length > 0
+  ) {
+    const beforeAuth =
+      findAuthCookie(cookie);
+
+    const merged =
+      mergeSetCookies(
+        cookie,
+        setCookies
+      );
+
+    /*
+     * 如果原本已有登入資料，
+     * 不讓一般匿名 Response
+     * 無故覆蓋掉完整 Cookie。
+     */
+    if (merged) {
+      cookie = merged;
+
+      $persistentStore.write(
+        cookie,
+        COOKIE_KEY
+      );
+
+      const auth =
+        findAuthCookie(cookie);
+
+      if (auth) {
+        $persistentStore.write(
+          auth,
+          AUTH_KEY
+        );
+      }
+
+      console.log(
+        "APK.TW：收到 " +
+          setCookies.length +
+          " 筆 Set-Cookie，已合併更新"
+      );
+
+      if (
+        beforeAuth &&
+        !auth
+      ) {
+        console.log(
+          "APK.TW：注意，伺服器已移除 auth Cookie"
+        );
+      }
+    }
+  }
+
+  $done({});
+}
+
+
+/* ==============================
+ * Main
+ * ============================== */
+
 try {
-  if (typeof $response !== "undefined") {
+  if (
+    typeof $response !==
+    "undefined"
+  ) {
     handleResponse();
   } else {
     handleRequest();
   }
-} catch (e) {
+} catch (error) {
   console.log(
-    "APK.TW Cookie V2 錯誤：" + e
+    "APK.TW Cookie V3 錯誤：" +
+      error
   );
 
-  $done();
+  $done({});
 }
