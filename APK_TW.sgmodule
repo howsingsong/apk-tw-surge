@@ -1,18 +1,22 @@
-#!name=APK.TW 自動簽到 V2
-#!desc=完整 Cookie 擷取、自動續期、每日簽到、二次補簽驗證
+#!name=APK.TW 自動簽到 V3
+#!desc=自動擷取登入 Cookie、每日簽到、失敗補簽、Cookie 自動續期與登入保活
 #!author=howsingsong
+#!arguments=sign_hour:0,sign_minute:20,retry_enabled:true,retry_hour:8,retry_minute:20,keepalive_enabled:true,keepalive_hour1:6,keepalive_hour2:18,keepalive_minute:10,sign_notify:true,login_notify:true,keepalive_notify:false
+#!arguments-desc=sign_hour/sign_minute：每日簽到時間；retry_enabled：補簽開關；retry_hour/retry_minute：補簽時間；keepalive_enabled：登入保活開關；keepalive_hour1/hour2/minute：保活時間；sign_notify：簽到通知；login_notify：登入 Cookie 擷取通知；keepalive_notify：保活通知。
 
 [Script]
 
-APK.TW Cookie 擷取 = type=http-request,pattern=^https:\/\/(?:www\.)?apk\.tw\/,script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_cookie.js,full-header-mode=true,timeout=10
+APK.TW Cookie 擷取 = type=http-request,pattern=^https:\/\/(?:www\.)?apk\.tw\/,script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_cookie.js,argument="login_notify={{{login_notify}}}",full-header-mode=true,timeout=10
 
 APK.TW Cookie 更新 = type=http-response,pattern=^https:\/\/(?:www\.)?apk\.tw\/,script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_cookie.js,full-header-mode=true,timeout=10
 
-APK.TW 每日自動簽到 = type=cron,cronexp="20 0 * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_checkin.js,wake-system=true,timeout=60
+APK.TW 每日自動簽到 = type=cron,cronexp="{{{sign_minute}}} {{{sign_hour}}} * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_checkin.js,argument="mode=checkin&notify={{{sign_notify}}}",wake-system=true,timeout=60
 
-APK.TW 補簽檢查 = type=cron,cronexp="20 8 * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_checkin.js,argument="silent_if_signed=1",wake-system=true,timeout=60
+APK.TW 補簽檢查 = type=cron,cronexp="{{{retry_minute}}} {{{retry_hour}}} * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_checkin.js,argument="mode=retry&enabled={{{retry_enabled}}}&silent_if_signed=1&notify={{{sign_notify}}}",wake-system=true,timeout=60
 
-APK.TW 登入保活 = type=cron,cronexp="10 6,18 * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_keepalive.js,wake-system=true,timeout=30
+APK.TW 登入保活 = type=cron,cronexp="{{{keepalive_minute}}} {{{keepalive_hour1}}},{{{keepalive_hour2}}} * * *",script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_keepalive.js,argument="mode=keepalive&enabled={{{keepalive_enabled}}}&notify={{{keepalive_notify}}}",wake-system=true,timeout=30
+
+APK.TW 登入狀態檢查 = type=generic,script-path=https://raw.githubusercontent.com/howsingsong/apk-tw-surge/main/apk_tw_keepalive.js,argument="mode=status&enabled=true&notify=true",timeout=30
 
 [MITM]
 hostname = %APPEND% apk.tw, www.apk.tw
