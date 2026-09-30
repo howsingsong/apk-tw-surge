@@ -1,12 +1,31 @@
 /*
- * APK.TW Auto Check-in V2
+ * APK.TW Auto Check-in V3
  * Author: howsingsong
+ *
+ * 重點：
+ * - 不再把 wb.gif 當成簽到成功
+ * - 使用 V3 完整 Cookie
+ * - 簽到前自動取得最新 formhash
+ * - 自動吸收 Set-Cookie
+ * - 送出 pper 後重新向網站確認
+ * - 無法確認就絕不報「成功」
  */
 
-const COOKIE_KEY = "APK_TW_COOKIE_V2";
-const UA_KEY = "APK_TW_UA";
-const FORMHASH_KEY = "APK_TW_FORMHASH";
-const LAST_SUCCESS_KEY = "APK_TW_LAST_SUCCESS_V2";
+const COOKIE_KEY =
+  "APK_TW_COOKIE_V3";
+
+const AUTH_KEY =
+  "APK_TW_AUTH_V3";
+
+const UA_KEY =
+  "APK_TW_UA_V3";
+
+const FORMHASH_KEY =
+  "APK_TW_FORMHASH_V3";
+
+const LAST_SUCCESS_KEY =
+  "APK_TW_LAST_SUCCESS_V3";
+
 
 const HOME =
   "https://apk.tw/forum.php";
@@ -14,180 +33,365 @@ const HOME =
 const SIGN_PAGE =
   "https://apk.tw/plugin.php?id=dsu_amupper:list";
 
+
+/* =========================
+ * Arguments
+ * ========================= */
+
+const ARG =
+  typeof $argument !== "undefined"
+    ? String($argument)
+    : "";
+
+const MODE =
+  /mode=retry/i.test(ARG)
+    ? "retry"
+    : "checkin";
+
+const RETRY_ENABLED =
+  !/enabled=(false|0|off|no)/i.test(
+    ARG
+  );
+
+const NOTIFY_ENABLED =
+  !/notify=(false|0|off|no)/i.test(
+    ARG
+  );
+
+const SILENT_IF_SIGNED =
+  /silent_if_signed=1/i.test(
+    ARG
+  );
+
+
+/* =========================
+ * 資料
+ * ========================= */
+
 let cookie =
-  $persistentStore.read(COOKIE_KEY) || "";
+  $persistentStore.read(
+    COOKIE_KEY
+  ) || "";
 
 const storedUA =
-  $persistentStore.read(UA_KEY);
+  $persistentStore.read(
+    UA_KEY
+  );
 
-const UA =
+const USER_AGENT =
   storedUA ||
   "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1";
 
-const silentIfSigned =
-  typeof $argument !== "undefined" &&
-  /silent_if_signed=1/i.test($argument);
 
 /* =========================
-   Cookie
-========================= */
+ * Cookie
+ * ========================= */
 
 function cookieObject(str) {
   const map = {};
 
   String(str || "")
     .split(/;\s*/)
-    .forEach(part => {
-      const p = part.indexOf("=");
+    .forEach(function (part) {
+      const pos =
+        part.indexOf("=");
 
-      if (p <= 0) return;
+      if (pos <= 0) {
+        return;
+      }
 
-      map[
-        part.substring(0, p).trim()
-      ] = part.substring(p + 1);
+      const name =
+        part
+          .substring(0, pos)
+          .trim();
+
+      const value =
+        part.substring(pos + 1);
+
+      if (name) {
+        map[name] = value;
+      }
     });
 
   return map;
 }
 
+
 function cookieString(map) {
   return Object.keys(map)
-    .map(k => `${k}=${map[k]}`)
+    .map(function (key) {
+      return (
+        key +
+        "=" +
+        map[key]
+      );
+    })
     .join("; ");
 }
 
-function hasAuth(str) {
-  return /(?:^|;\s*)[^=;]+_auth=[^;]+/i.test(
-    str || ""
-  );
+
+function findAuth(str) {
+  const map =
+    cookieObject(str);
+
+  const keys =
+    Object.keys(map);
+
+  for (
+    let i = 0;
+    i < keys.length;
+    i++
+  ) {
+    const key =
+      keys[i];
+
+    if (
+      /_auth$/i.test(key) &&
+      map[key]
+    ) {
+      return (
+        key +
+        "=" +
+        map[key]
+      );
+    }
+  }
+
+  return "";
 }
 
-function headerValues(headers, name) {
-  const arr = [];
 
-  if (!headers) return arr;
+function hasAuth(str) {
+  return !!findAuth(str);
+}
 
-  if (Array.isArray(headers)) {
-    headers.forEach(h => {
+
+/* =========================
+ * Header
+ * ========================= */
+
+function headerValues(
+  headers,
+  name
+) {
+  const result = [];
+
+  if (!headers) {
+    return result;
+  }
+
+  if (
+    Array.isArray(headers)
+  ) {
+    headers.forEach(
+      function (item) {
+        if (
+          item &&
+          item.field &&
+          String(
+            item.field
+          ).toLowerCase() ===
+            name.toLowerCase()
+        ) {
+          result.push(
+            String(
+              item.value || ""
+            )
+          );
+        }
+      }
+    );
+
+    return result;
+  }
+
+  Object.keys(headers)
+    .forEach(function (key) {
       if (
-        h &&
-        h.field &&
-        h.field.toLowerCase() ===
-          name.toLowerCase()
+        key.toLowerCase() !==
+        name.toLowerCase()
       ) {
-        arr.push(String(h.value || ""));
+        return;
+      }
+
+      const value =
+        headers[key];
+
+      if (
+        Array.isArray(value)
+      ) {
+        value.forEach(
+          function (v) {
+            result.push(
+              String(v || "")
+            );
+          }
+        );
+      } else {
+        result.push(
+          String(value || "")
+        );
       }
     });
 
-    return arr;
-  }
-
-  Object.keys(headers).forEach(k => {
-    if (
-      k.toLowerCase() ===
-      name.toLowerCase()
-    ) {
-      const v = headers[k];
-
-      if (Array.isArray(v)) {
-        v.forEach(x =>
-          arr.push(String(x))
-        );
-      } else {
-        arr.push(String(v || ""));
-      }
-    }
-  });
-
-  return arr;
+  return result;
 }
 
+
+/* =========================
+ * Set-Cookie
+ * ========================= */
+
 function mergeCookies(headers) {
-  const map = cookieObject(cookie);
+  const map =
+    cookieObject(cookie);
 
-  headerValues(
-    headers,
-    "set-cookie"
-  ).forEach(line => {
-    const first =
-      line.split(";")[0];
+  const lines =
+    headerValues(
+      headers,
+      "set-cookie"
+    );
 
-    const p =
-      first.indexOf("=");
+  lines.forEach(
+    function (line) {
+      if (!line) {
+        return;
+      }
 
-    if (p <= 0) return;
+      const first =
+        String(line)
+          .split(";")[0];
 
-    const name =
-      first.substring(0, p).trim();
+      const pos =
+        first.indexOf("=");
 
-    const value =
-      first.substring(p + 1);
+      if (pos <= 0) {
+        return;
+      }
 
-    const deleted =
-      /^deleted$/i.test(value) ||
-      /max-age\s*=\s*0/i.test(line) ||
-      /expires\s*=\s*.*1970/i.test(line);
+      const name =
+        first
+          .substring(0, pos)
+          .trim();
 
-    if (deleted) {
-      delete map[name];
-    } else {
-      map[name] = value;
+      const value =
+        first.substring(
+          pos + 1
+        );
+
+      const deleted =
+        /^deleted$/i.test(
+          value
+        ) ||
+        /max-age\s*=\s*0/i.test(
+          line
+        ) ||
+        /expires\s*=\s*.*1970/i.test(
+          line
+        );
+
+      if (deleted) {
+        delete map[name];
+      } else {
+        map[name] =
+          value;
+      }
     }
-  });
+  );
 
-  cookie = cookieString(map);
+  cookie =
+    cookieString(map);
 
   $persistentStore.write(
     cookie,
     COOKIE_KEY
   );
+
+  const auth =
+    findAuth(cookie);
+
+  if (auth) {
+    $persistentStore.write(
+      auth,
+      AUTH_KEY
+    );
+  }
 }
 
+
 /* =========================
-   HTTP
-========================= */
+ * HTTP Headers
+ * ========================= */
 
 function normalHeaders() {
   return {
-    "User-Agent": UA,
+    "User-Agent":
+      USER_AGENT,
+
     "Accept":
       "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+
     "Accept-Language":
-      "zh-TW,zh-Hant;q=0.9",
-    "Referer": HOME,
-    "Cookie": cookie
+      "zh-TW,zh-Hant;q=0.9,en;q=0.8",
+
+    "Referer":
+      HOME,
+
+    "Cookie":
+      cookie
   };
 }
 
+
 function ajaxHeaders() {
   return {
-    "User-Agent": UA,
-    "Accept": "*/*",
+    "User-Agent":
+      USER_AGENT,
+
+    "Accept":
+      "*/*",
+
     "Accept-Language":
-      "zh-TW,zh-Hant;q=0.9",
+      "zh-TW,zh-Hant;q=0.9,en;q=0.8",
 
-    "Referer": HOME,
-
-    "Sec-Fetch-Site":
-      "same-origin",
-    "Sec-Fetch-Mode":
-      "cors",
-    "Sec-Fetch-Dest":
-      "empty",
+    "Referer":
+      HOME,
 
     "X-Requested-With":
       "XMLHttpRequest",
 
-    "Cookie": cookie
+    "Sec-Fetch-Site":
+      "same-origin",
+
+    "Sec-Fetch-Mode":
+      "cors",
+
+    "Sec-Fetch-Dest":
+      "empty",
+
+    "Cookie":
+      cookie
   };
 }
 
-function get(url, ajax = false) {
+
+/* =========================
+ * HTTP
+ * ========================= */
+
+function httpGet(
+  url,
+  ajax
+) {
   return new Promise(
-    (resolve, reject) => {
+    function (
+      resolve,
+      reject
+    ) {
       $httpClient.get(
         {
-          url,
+          url: url,
+
           headers:
             ajax
               ? ajaxHeaders()
@@ -195,20 +399,41 @@ function get(url, ajax = false) {
 
           timeout: 15,
 
-          "auto-cookie": false,
-          "auto-redirect": true,
-          "full-header-mode": true
+          /*
+           * Cookie 完全由我們自己管理。
+           */
+          "auto-cookie":
+            false,
+
+          "auto-redirect":
+            true,
+
+          /*
+           * 保留重複 Set-Cookie。
+           */
+          "full-header-mode":
+            true
         },
 
-        (error, response, data) => {
+        function (
+          error,
+          response,
+          data
+        ) {
           if (error) {
             reject(
-              new Error(error)
+              new Error(
+                String(error)
+              )
             );
+
             return;
           }
 
-          if (response) {
+          if (
+            response &&
+            response.headers
+          ) {
             mergeCookies(
               response.headers
             );
@@ -221,7 +446,9 @@ function get(url, ajax = false) {
                 : 0,
 
             body:
-              String(data || "")
+              String(
+                data || ""
+              )
           });
         }
       );
@@ -229,154 +456,204 @@ function get(url, ajax = false) {
   );
 }
 
+
 function sleep(ms) {
   return new Promise(
-    r => setTimeout(r, ms)
+    function (resolve) {
+      setTimeout(
+        resolve,
+        ms
+      );
+    }
   );
 }
+
 
 /* =========================
-   網頁分析
-========================= */
+ * 網頁分析
+ * ========================= */
 
-function loginRequired(html) {
+function loginExpired(html) {
+  const body =
+    String(html || "");
+
   return (
-    /您需要先登錄才能繼續本操作/i.test(html) ||
-    /請先登錄/i.test(html) ||
-    /尚未登錄/i.test(html)
+    /您需要先登錄才能繼續本操作/i.test(
+      body
+    ) ||
+    /請先登錄/i.test(
+      body
+    ) ||
+    /尚未登錄/i.test(
+      body
+    ) ||
+    /member\.php\?mod=logging[^"'<>]*action=login/i.test(
+      body
+    )
   );
 }
 
+
 function extractFormhash(html) {
+  const body =
+    String(html || "");
+
   const patterns = [
     /name=["']formhash["'][^>]*value=["']([^"']+)["']/i,
+
     /value=["']([^"']+)["'][^>]*name=["']formhash["']/i,
+
     /[?&](?:amp;)?formhash=([a-zA-Z0-9]+)/i,
+
     /formhash["']?\s*[:=]\s*["']([a-zA-Z0-9]+)["']/i
   ];
 
-  for (const p of patterns) {
-    const m =
-      String(html || "").match(p);
+  for (
+    let i = 0;
+    i < patterns.length;
+    i++
+  ) {
+    const match =
+      body.match(
+        patterns[i]
+      );
 
-    if (m && m[1]) {
-      return m[1];
+    if (
+      match &&
+      match[1]
+    ) {
+      return match[1];
     }
   }
 
   return "";
 }
 
-/*
- * 重點：
- * 不判斷 wb.gif。
- */
-function signedOnSignPage(html) {
-  return (
-    /您本日已經簽到/i.test(html) ||
-    /您本日已經签到/i.test(html) ||
-    /今日已簽/i.test(html) ||
-    /今天已簽到/i.test(html)
-  );
-}
 
-function signedOnHome(html) {
-  const source =
+/*
+ * V3：
+ * 絕對不使用 wb.gif 判斷。
+ *
+ * 只有 APK.TW 網頁明確寫出
+ * 已簽到相關文字時才算成功。
+ */
+function isSigned(html) {
+  const body =
     String(html || "");
 
-  const pos =
-    source.search(
-      /id=["']my_amupper["']/i
-    );
-
-  if (pos < 0) {
-    return false;
-  }
-
-  /*
-   * 只檢查 my_amupper 附近的文字，
-   * 不再把 wb.gif 視為成功。
-   */
-  const block =
-    source.substring(
-      Math.max(0, pos - 300),
-      Math.min(
-        source.length,
-        pos + 1800
-      )
-    );
-
   return (
-    /已簽到/i.test(block) ||
-    /本日已經簽到/i.test(block)
+    /您本日已經簽到/i.test(
+      body
+    ) ||
+    /您本日已經签到/i.test(
+      body
+    ) ||
+    /本日已簽到/i.test(
+      body
+    ) ||
+    /今日已簽到/i.test(
+      body
+    ) ||
+    /今天已簽到/i.test(
+      body
+    ) ||
+    /今日已簽/i.test(
+      body
+    )
   );
 }
 
+
 /* =========================
-   查詢真正狀態
-========================= */
+ * 狀態查詢
+ * ========================= */
 
 async function checkStatus() {
   let formhash = "";
 
+  /*
+   * 先打首頁，
+   * 同時讓網站更新 Cookie。
+   */
   const home =
-    await get(HOME);
+    await httpGet(
+      HOME,
+      false
+    );
 
   if (
-    loginRequired(home.body)
+    loginExpired(
+      home.body
+    )
   ) {
     return {
-      signed: false,
       expired: true,
+      signed: false,
       formhash: ""
     };
   }
 
   formhash =
-    extractFormhash(home.body);
+    extractFormhash(
+      home.body
+    );
 
   if (
-    signedOnHome(home.body)
+    isSigned(
+      home.body
+    )
   ) {
     return {
-      signed: true,
       expired: false,
-      formhash
+      signed: true,
+      formhash: formhash
     };
   }
 
-  const sign =
-    await get(SIGN_PAGE);
+  /*
+   * 再開真正簽到頁。
+   */
+  const signPage =
+    await httpGet(
+      SIGN_PAGE,
+      false
+    );
 
   if (
-    loginRequired(sign.body)
+    loginExpired(
+      signPage.body
+    )
   ) {
     return {
-      signed: false,
       expired: true,
-      formhash
+      signed: false,
+      formhash: formhash
     };
   }
 
   if (!formhash) {
     formhash =
-      extractFormhash(sign.body);
+      extractFormhash(
+        signPage.body
+      );
   }
 
   return {
+    expired: false,
     signed:
-      signedOnSignPage(
-        sign.body
+      isSigned(
+        signPage.body
       ),
 
-    expired: false,
-    formhash
+    formhash:
+      formhash
   };
 }
 
+
 /* =========================
-   Notification
-========================= */
+ * Notification
+ * ========================= */
 
 function notify(
   title,
@@ -384,213 +661,339 @@ function notify(
   body
 ) {
   console.log(
-    `${title} | ${subtitle} | ${body}`
+    title +
+      " | " +
+      subtitle +
+      " | " +
+      body
   );
+
+  if (
+    !NOTIFY_ENABLED
+  ) {
+    return;
+  }
 
   $notification.post(
     title,
     subtitle,
     body,
     {
-      url: SIGN_PAGE
+      url:
+        SIGN_PAGE
     }
   );
 }
 
+
 /* =========================
-   Main
-========================= */
+ * 日期
+ * ========================= */
+
+function today() {
+  const d =
+    new Date();
+
+  return (
+    d.getFullYear() +
+    "-" +
+    String(
+      d.getMonth() + 1
+    ).padStart(2, "0") +
+    "-" +
+    String(
+      d.getDate()
+    ).padStart(2, "0")
+  );
+}
+
+
+/* =========================
+ * Main
+ * ========================= */
 
 async function main() {
   console.log(
-    "===== APK.TW V2 ====="
+    "============================"
   );
 
+  console.log(
+    "APK.TW Auto Check-in V3"
+  );
+
+  console.log(
+    "模式：" + MODE
+  );
+
+  console.log(
+    "============================"
+  );
+
+
+  /*
+   * 補簽關閉
+   */
+  if (
+    MODE === "retry" &&
+    !RETRY_ENABLED
+  ) {
+    console.log(
+      "APK.TW：補簽功能已關閉"
+    );
+
+    return;
+  }
+
+
+  /*
+   * Cookie
+   */
   if (
     !cookie ||
     !hasAuth(cookie)
   ) {
     notify(
       "❌ APK.TW",
-      "登入資料不存在",
-      "請使用 Safari 登入 APK.TW 一次。"
+      "沒有有效登入資料",
+      "請先使用 Safari 登入 APK.TW，讓 Surge 重新擷取 V3 Cookie。"
     );
 
     return;
   }
 
+
   /*
-   * 簽到前先向伺服器確認。
+   * 先確認目前狀態
    */
   let state =
     await checkStatus();
 
-  if (state.expired) {
+
+  if (
+    state.expired
+  ) {
     notify(
       "❌ APK.TW",
-      "登入已失效",
-      "請重新登入 APK.TW 一次。"
+      "登入狀態已失效",
+      "APK.TW 要求重新登入，請重新登入一次。"
     );
 
     return;
   }
 
-  if (state.signed) {
+
+  /*
+   * 已經簽過
+   */
+  if (
+    state.signed
+  ) {
     console.log(
-      "APK.TW：伺服器確認今日已簽到"
+      "APK.TW：網站確認今日已簽到"
     );
 
-    if (!silentIfSigned) {
+    $persistentStore.write(
+      today(),
+      LAST_SUCCESS_KEY
+    );
+
+    if (
+      !SILENT_IF_SIGNED
+    ) {
       notify(
         "☑️ APK.TW",
         "今日已簽到",
-        "已由 APK.TW 簽到頁確認。"
+        "已由 APK.TW 網頁實際狀態確認。"
       );
     }
 
     return;
   }
 
+
+  /*
+   * formhash
+   */
   let formhash =
-    state.formhash ||
-    $persistentStore.read(
-      FORMHASH_KEY
-    );
+    state.formhash;
+
+  if (!formhash) {
+    formhash =
+      $persistentStore.read(
+        FORMHASH_KEY
+      ) || "";
+  }
+
 
   if (!formhash) {
     notify(
       "❌ APK.TW",
       "找不到 formhash",
-      "請先用 Safari 開啟 APK.TW forum.php。"
+      "請先用 Safari 開啟 APK.TW forum.php，再重新執行。"
     );
 
     return;
   }
+
 
   $persistentStore.write(
     formhash,
     FORMHASH_KEY
   );
 
-  const ts =
+
+  /*
+   * timestamp
+   */
+  const timestamp =
     Math.floor(
       Date.now() / 1000
     );
 
-  const url =
+
+  /*
+   * 與你真正成功封包相同的 URL。
+   */
+  const signURL =
     "https://apk.tw/plugin.php" +
     "?id=dsu_amupper:pper" +
     "&ajax=1" +
     "&formhash=" +
-    encodeURIComponent(formhash) +
+    encodeURIComponent(
+      formhash
+    ) +
     "&zjtesttimes=" +
-    ts +
+    timestamp +
     "&inajax=1" +
     "&ajaxtarget=my_amupper";
 
+
   console.log(
-    "APK.TW：送出真正 pper 簽到"
+    "APK.TW：送出 pper 簽到"
   );
 
-  const result =
-    await get(
-      url,
+
+  const response =
+    await httpGet(
+      signURL,
       true
     );
 
+
   console.log(
-    "HTTP：" +
-      result.status
+    "APK.TW：pper HTTP " +
+      response.status
   );
 
+
   /*
-   * wb.gif 只記錄，不算成功。
+   * wb.gif 只做 Debug。
+   * 不再代表成功。
    */
   if (
     /dsu_amupper\/images\/wb\.gif/i.test(
-      result.body
+      response.body
     )
   ) {
     console.log(
-      "收到 wb.gif，但尚未判定成功"
+      "APK.TW：收到 wb.gif，但 V3 不把它當成成功"
     );
   }
 
+
   /*
-   * APK.TW 官方曾提到資料寫入
-   * 有時會有延遲，所以重新整理數次。
+   * 真正向伺服器重新驗證。
+   *
+   * 有些站點寫入後不會立即反映，
+   * 所以最多確認四次。
    */
   for (
-    let i = 1;
-    i <= 4;
-    i++
+    let attempt = 1;
+    attempt <= 4;
+    attempt++
   ) {
-    await sleep(2500);
+    await sleep(
+      2500
+    );
 
     console.log(
-      `APK.TW：第 ${i} 次驗證`
+      "APK.TW：第 " +
+        attempt +
+        " 次確認真正簽到狀態"
     );
 
     state =
       await checkStatus();
 
-    if (state.expired) {
+
+    if (
+      state.expired
+    ) {
       notify(
         "❌ APK.TW",
         "登入狀態失效",
-        "簽到後重新驗證時登入失效。"
+        "簽到後重新確認時，APK.TW 要求重新登入。"
       );
 
       return;
     }
 
-    if (state.signed) {
-      const now =
-        new Date();
 
-      const date =
-        `${now.getFullYear()}-` +
-        `${String(now.getMonth() + 1).padStart(2, "0")}-` +
-        `${String(now.getDate()).padStart(2, "0")}`;
-
+    if (
+      state.signed
+    ) {
       $persistentStore.write(
-        date,
+        today(),
         LAST_SUCCESS_KEY
       );
 
       notify(
         "✅ APK.TW",
         "簽到成功",
-        `已經過 APK.TW 伺服器第 ${i} 次狀態驗證。`
+        "APK.TW 網頁已實際確認今日完成簽到。驗證次數：" +
+          attempt
       );
 
       return;
     }
   }
 
+
   /*
-   * 絕對不再報假成功。
+   * 這裡最重要：
+   *
+   * 即使 HTTP 200
+   * 即使有 wb.gif
+   *
+   * 網站沒有確認，就絕不說成功。
    */
   notify(
     "⚠️ APK.TW",
-    "簽到未確認",
-    "pper 已執行，但伺服器仍未確認今日簽到；08:20 會再自動補簽。"
+    "簽到尚未確認",
+    MODE === "checkin"
+      ? "pper 已送出，但網站仍未顯示今日簽到完成。稍後會由補簽功能再次嘗試。"
+      : "補簽請求已送出，但網站仍未確認今日簽到。"
   );
 }
 
+
+/* =========================
+ * Run
+ * ========================= */
+
 main()
-  .catch(e => {
+  .catch(function (error) {
     console.log(
-      "APK.TW V2 Error：" +
-        e
+      "APK.TW V3 Error：" +
+        error
     );
 
     notify(
       "❌ APK.TW",
-      "腳本錯誤",
-      String(e)
+      "腳本執行錯誤",
+      String(error)
     );
   })
-  .finally(() => {
+  .finally(function () {
     $done();
   });
