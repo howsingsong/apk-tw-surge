@@ -1,107 +1,217 @@
 /*
- * APK.TW Cookie 自動擷取
+ * APK.TW Cookie Manager V2
  * Author: howsingsong
+ *
+ * 同時支援：
+ * - http-request：完整擷取 Safari Cookie / UA
+ * - http-response：合併伺服器 Set-Cookie
  */
 
-const COOKIE_KEY = "APK_TW_COOKIE";
+const COOKIE_KEY = "APK_TW_COOKIE_V2";
+const UA_KEY = "APK_TW_UA";
 const FORMHASH_KEY = "APK_TW_FORMHASH";
-const AUTH_KEY = "APK_TW_AUTH";
 
-function getHeader(headers, target) {
-  if (!headers) return "";
+function headerValues(headers, name) {
+  const result = [];
+  if (!headers) return result;
 
-  const keys = Object.keys(headers);
-
-  for (let i = 0; i < keys.length; i++) {
-    if (keys[i].toLowerCase() === target.toLowerCase()) {
-      const value = headers[keys[i]];
-
-      if (Array.isArray(value)) {
-        return value.join("; ");
+  if (Array.isArray(headers)) {
+    headers.forEach(h => {
+      if (
+        h &&
+        h.field &&
+        h.field.toLowerCase() === name.toLowerCase()
+      ) {
+        result.push(String(h.value || ""));
       }
-
-      return String(value || "");
-    }
+    });
+    return result;
   }
 
-  return "";
+  Object.keys(headers).forEach(key => {
+    if (key.toLowerCase() !== name.toLowerCase()) return;
+
+    const v = headers[key];
+
+    if (Array.isArray(v)) {
+      v.forEach(x => result.push(String(x || "")));
+    } else {
+      result.push(String(v || ""));
+    }
+  });
+
+  return result;
 }
 
-function getAuthCookie(cookie) {
-  if (!cookie) return "";
+function cookieObjectFromValues(values) {
+  const map = {};
 
-  const parts = cookie.split(/;\s*/);
+  values.forEach(value => {
+    String(value || "")
+      .split(/;\s*/)
+      .forEach(part => {
+        const pos = part.indexOf("=");
 
-  for (let i = 0; i < parts.length; i++) {
-    const pos = parts[i].indexOf("=");
+        if (pos <= 0) return;
 
-    if (pos === -1) continue;
+        const name = part.substring(0, pos).trim();
+        const val = part.substring(pos + 1);
 
-    const name = parts[i].substring(0, pos).trim();
-    const value = parts[i].substring(pos + 1);
+        if (name) map[name] = val;
+      });
+  });
 
-    if (/_auth$/i.test(name) && value) {
-      return name + "=" + value;
+  return map;
+}
+
+function cookieObject(cookie) {
+  return cookieObjectFromValues([cookie || ""]);
+}
+
+function cookieString(map) {
+  return Object.keys(map)
+    .map(key => `${key}=${map[key]}`)
+    .join("; ");
+}
+
+function hasAuth(cookie) {
+  return /(?:^|;\s*)[^=;]+_auth=[^;]+/i.test(cookie || "");
+}
+
+function mergeSetCookies(oldCookie, lines) {
+  const map = cookieObject(oldCookie);
+
+  lines.forEach(line => {
+    if (!line) return;
+
+    const first = line.split(";")[0];
+    const pos = first.indexOf("=");
+
+    if (pos <= 0) return;
+
+    const name = first.substring(0, pos).trim();
+    const value = first.substring(pos + 1);
+
+    const deleted =
+      /^deleted$/i.test(value) ||
+      /max-age\s*=\s*0/i.test(line) ||
+      /expires\s*=\s*(?:thu|tue|wed|mon|fri|sat|sun),?\s*0?1[-\s]jan[-\s]1970/i.test(line);
+
+    if (deleted) {
+      delete map[name];
+    } else {
+      map[name] = value;
+    }
+  });
+
+  return cookieString(map);
+}
+
+function saveFormhash(url) {
+  const m = String(url || "").match(/[?&]formhash=([^&#]+)/i);
+
+  if (!m || !m[1]) return;
+
+  try {
+    $persistentStore.write(
+      decodeURIComponent(m[1]),
+      FORMHASH_KEY
+    );
+  } catch (_) {
+    $persistentStore.write(m[1], FORMHASH_KEY);
+  }
+}
+
+/*
+ * REQUEST
+ */
+function handleRequest() {
+  const values = headerValues(
+    $request.headers,
+    "cookie"
+  );
+
+  if (values.length) {
+    const fullCookie =
+      cookieString(cookieObjectFromValues(values));
+
+    /*
+     * 只有含登入 auth 才覆寫，
+     * 避免訪客 Cookie 蓋掉有效登入。
+     */
+    if (fullCookie && hasAuth(fullCookie)) {
+      $persistentStore.write(
+        fullCookie,
+        COOKIE_KEY
+      );
+
+      console.log(
+        `APK.TW：已擷取完整 Cookie，共 ${Object.keys(cookieObject(fullCookie)).length} 項`
+      );
     }
   }
 
-  return "";
+  const uas = headerValues(
+    $request.headers,
+    "user-agent"
+  );
+
+  if (uas[0]) {
+    $persistentStore.write(
+      uas[0],
+      UA_KEY
+    );
+  }
+
+  saveFormhash($request.url);
+
+  /*
+   * 不修改任何原始 Request
+   */
+  $done();
+}
+
+/*
+ * RESPONSE
+ */
+function handleResponse() {
+  let cookie =
+    $persistentStore.read(COOKIE_KEY) || "";
+
+  const sets = headerValues(
+    $response.headers,
+    "set-cookie"
+  );
+
+  if (sets.length) {
+    cookie = mergeSetCookies(
+      cookie,
+      sets
+    );
+
+    $persistentStore.write(
+      cookie,
+      COOKIE_KEY
+    );
+
+    console.log(
+      `APK.TW：收到 ${sets.length} 筆 Set-Cookie，已更新`
+    );
+  }
+
+  $done();
 }
 
 try {
-  const headers = $request.headers || {};
-  const cookie = getHeader(headers, "cookie");
-  const url = $request.url || "";
-
-  const authCookie = getAuthCookie(cookie);
-
-  /*
-   * 只有真正包含登入 auth Cookie 時才更新，
-   * 避免訪客 Cookie 覆蓋已登入 Cookie。
-   */
-  if (cookie && authCookie) {
-    const oldAuth = $persistentStore.read(AUTH_KEY);
-
-    $persistentStore.write(cookie, COOKIE_KEY);
-    $persistentStore.write(authCookie, AUTH_KEY);
-
-    console.log("APK.TW：登入 Cookie 已擷取");
-
-    if (!oldAuth) {
-      $notification.post(
-        "APK.TW",
-        "登入資料擷取成功",
-        "已儲存登入 Cookie，可以使用自動簽到。"
-      );
-    } else if (oldAuth !== authCookie) {
-      $notification.post(
-        "APK.TW",
-        "登入資料已更新",
-        "偵測到新的登入 Cookie，已自動更新。"
-      );
-    }
-  }
-
-  /*
-   * 如果目前請求本身帶有 formhash，
-   * 順便保存做為備用。
-   */
-  const match = url.match(/[?&]formhash=([^&#]+)/i);
-
-  if (match && match[1]) {
-    let hash = match[1];
-
-    try {
-      hash = decodeURIComponent(hash);
-    } catch (e) {}
-
-    if (hash) {
-      $persistentStore.write(hash, FORMHASH_KEY);
-      console.log("APK.TW：formhash 已更新");
-    }
+  if (typeof $response !== "undefined") {
+    handleResponse();
+  } else {
+    handleRequest();
   }
 } catch (e) {
-  console.log("APK.TW Cookie 擷取錯誤：" + e);
-}
+  console.log(
+    "APK.TW Cookie V2 錯誤：" + e
+  );
 
-$done({});
+  $done();
+}
